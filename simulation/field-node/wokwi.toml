@@ -1,0 +1,13 @@
+[wokwi]
+version = 1
+elf = "build/sketch.ino.elf"
+firmware = "build/sketch.ino.hex"
+
+[[lib]]
+name = "RF24"
+
+[[lib]]
+name = "DHT sensor library"
+
+[[lib]]
+name = "Adafruit Unified Sensor"

@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "author": "CSIS IoT Team",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-arduino-uno",
+      "id": "uno",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-dht22",
+      "id": "dht1",
+      "top": -100,
+      "left": 220,
+      "attrs": { "humidity": "55", "temperature": "26" }
+    },
+    {
+      "type": "wokwi-photoresistor-sensor",
+      "id": "ldr1",
+      "top": -100,
+      "left": 340,
+      "attrs": { "lux": "500" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": -60,
+      "left": 470,
+      "attrs": { "color": "red" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": -20,
+      "left": 470,
+      "attrs": { "value": "220" }
+    },
+    {
+      "type": "wokwi-nrf24l01",
+      "id": "nrf1",
+      "top": 120,
+      "left": 220,
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    ["uno:5V",   "dht1:VCC", "red",   []],
+    ["uno:GND",  "dht1:GND", "black", []],
+    ["uno:7",    "dht1:SDA", "green", []],
+
+    ["uno:5V",   "ldr1:VCC", "red",   []],
+    ["uno:GND",  "ldr1:GND", "black", []],
+    ["uno:A0",   "ldr1:AO",  "green", []],
+
+    ["uno:4",    "r1:1",     "orange",[]],
+    ["r1:2",     "led1:A",   "orange",[]],
+    ["led1:K",   "uno:GND",  "black", []],
+
+    ["uno:13",   "nrf1:SCK", "blue",  []],
+    ["uno:12",   "nrf1:MISO","yellow",[]],
+    ["uno:11",   "nrf1:MOSI","green", []],
+    ["uno:10",   "nrf1:CSN", "purple",[]],
+    ["uno:9",    "nrf1:CE",  "gray",  []],
+    ["uno:3.3V", "nrf1:VCC", "red",   []],
+    ["uno:GND",  "nrf1:GND", "black", []]
+  ],
+  "dependencies": {}
+}

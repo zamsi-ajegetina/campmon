@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "author": "CSIS IoT Team",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-devkit-v1",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-nrf24l01",
+      "id": "nrf1",
+      "top": -100,
+      "left": 280,
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    ["esp:18",   "nrf1:SCK",  "blue",   []],
+    ["esp:19",   "nrf1:MISO", "yellow", []],
+    ["esp:23",   "nrf1:MOSI", "green",  []],
+    ["esp:21",   "nrf1:CSN",  "purple", []],
+    ["esp:22",   "nrf1:CE",   "gray",   []],
+    ["esp:3V3",  "nrf1:VCC",  "red",    []],
+    ["esp:GND.1","nrf1:GND",  "black",  []]
+  ],
+  "dependencies": {}
+}
