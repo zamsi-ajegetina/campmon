@@ -1,0 +1,158 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_SQLITE",
+      "label": "SQLite",
+      "description": "campus_iot.db",
+      "type": "datasource",
+      "pluginId": "frser-sqlite-datasource",
+      "pluginName": "SQLite"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0" },
+    { "type": "datasource", "id": "frser-sqlite-datasource", "name": "SQLite", "version": "3.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
+    { "type": "panel", "id": "table", "name": "Table", "version": "" }
+  ],
+  "annotations": { "list": [] },
+  "description": "Ashesi Campus IoT — Temperature, Humidity, Light",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 10,
+      "title": "Live Sensor Readings",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2 },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "queryText": "SELECT ts as time, node_id || ' - ' || CASE node_id WHEN 1 THEN 'Fab Lab' WHEN 2 THEN 'MPR' WHEN 3 THEN 'Eng Block' WHEN 4 THEN 'Mech Workshop' WHEN 5 THEN 'PNRB' END as metric, value FROM sensor_readings WHERE measurement = 'temperature' AND ts >= datetime('now', '-1 hour') ORDER BY ts ASC",
+          "queryType": "table",
+          "rawQueryText": true,
+          "timeColumns": ["time"]
+        }
+      ],
+      "title": "Temperature (°C) — All Nodes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2 },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "targets": [
+        {
+          "queryText": "SELECT ts as time, node_id || ' - ' || CASE node_id WHEN 1 THEN 'Fab Lab' WHEN 2 THEN 'MPR' WHEN 3 THEN 'Eng Block' WHEN 4 THEN 'Mech Workshop' WHEN 5 THEN 'PNRB' END as metric, value FROM sensor_readings WHERE measurement = 'humidity' AND ts >= datetime('now', '-1 hour') ORDER BY ts ASC",
+          "queryType": "table",
+          "rawQueryText": true,
+          "timeColumns": ["time"]
+        }
+      ],
+      "title": "Humidity (%) — All Nodes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2 }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "id": 3,
+      "targets": [
+        {
+          "queryText": "SELECT ts as time, node_id || ' - ' || CASE node_id WHEN 1 THEN 'Fab Lab' WHEN 2 THEN 'MPR' WHEN 3 THEN 'Eng Block' WHEN 4 THEN 'Mech Workshop' WHEN 5 THEN 'PNRB' END as metric, value FROM sensor_readings WHERE measurement = 'light' AND ts >= datetime('now', '-1 hour') ORDER BY ts ASC",
+          "queryType": "table",
+          "rawQueryText": true,
+          "timeColumns": ["time"]
+        }
+      ],
+      "title": "Light Level (ADC 0-1023) — All Nodes",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "id": 11,
+      "title": "Latest Values",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "fieldConfig": {
+        "defaults": { "unit": "celsius", "thresholds": {
+          "mode": "absolute",
+          "steps": [{"color": "blue","value":null},{"color":"green","value":20},{"color":"orange","value":30},{"color":"red","value":35}]
+        }},
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 18 },
+      "id": 4,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "value_and_name" },
+      "targets": [
+        {
+          "queryText": "SELECT CASE node_id WHEN 1 THEN 'Fab Lab' WHEN 2 THEN 'MPR' WHEN 3 THEN 'Eng Block' WHEN 4 THEN 'Mech Workshop' WHEN 5 THEN 'PNRB' END as metric, value FROM sensor_readings WHERE measurement='temperature' GROUP BY node_id HAVING MAX(id)",
+          "queryType": "table",
+          "rawQueryText": true,
+          "timeColumns": []
+        }
+      ],
+      "title": "Current Temperature per Node",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 22 },
+      "id": 5,
+      "targets": [
+        {
+          "queryText": "SELECT n.node_id, CASE n.node_id WHEN 1 THEN 'Fab Lab' WHEN 2 THEN 'MPR' WHEN 3 THEN 'Eng Block' WHEN 4 THEN 'Mech Workshop' WHEN 5 THEN 'PNRB' END as location, s.status, s.updated as last_seen FROM node_status s JOIN (SELECT DISTINCT node_id FROM sensor_readings) n ON n.node_id = s.node_id ORDER BY n.node_id",
+          "queryType": "table",
+          "rawQueryText": true,
+          "timeColumns": []
+        }
+      ],
+      "title": "Node Status",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["iot", "campus", "ashesi"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "Africa/Accra",
+  "title": "Campus IoT Dashboard",
+  "uid": "campus-iot-v1",
+  "version": 1
+}
