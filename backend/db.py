@@ -1,41 +1,61 @@
 """
-Database query helpers — used by any scripts that need to read from the DB.
+Database query helpers — reads from PostgreSQL.
 Also provides a simple CLI to inspect recent readings.
 
 Usage:
     python db.py                         # show last 20 readings
     python db.py --node 1                # readings for node 1
     python db.py --node 2 --limit 50    # last 50 readings for node 2
+
+Environment variables (optional):
+    PG_HOST / PG_PORT / PG_DB / PG_USER / PG_PASS
 """
 
 import argparse
-import sqlite3
 import os
 
-DB_PATH = os.getenv("DB_PATH", "campus_iot.db")
+import psycopg2
+
+PG_HOST = os.getenv("PG_HOST", "")   # empty = Unix socket (peer auth, no password)
+PG_PORT = int(os.getenv("PG_PORT",   "5432"))
+PG_DB   = os.getenv("PG_DB",   "campus_iot")
+PG_USER = os.getenv("PG_USER", os.getenv("USER", "postgres"))
+PG_PASS = os.getenv("PG_PASS", "")
 
 
-def get_recent(conn: sqlite3.Connection, node_id=None, limit=20):
-    if node_id:
-        return conn.execute(
-            """SELECT ts, node_id, measurement, value
-               FROM sensor_readings
-               WHERE node_id = ?
-               ORDER BY id DESC LIMIT ?""",
-            (node_id, limit),
-        ).fetchall()
-    return conn.execute(
-        """SELECT ts, node_id, measurement, value
-           FROM sensor_readings
-           ORDER BY id DESC LIMIT ?""",
-        (limit,),
-    ).fetchall()
+def connect() -> psycopg2.extensions.connection:
+    kwargs = dict(dbname=PG_DB, user=PG_USER)
+    if PG_HOST:
+        kwargs.update(host=PG_HOST, port=PG_PORT, password=PG_PASS)
+    return psycopg2.connect(**kwargs)
 
 
-def get_status(conn: sqlite3.Connection):
-    return conn.execute(
-        "SELECT node_id, status, updated FROM node_status ORDER BY node_id"
-    ).fetchall()
+def get_recent(conn: psycopg2.extensions.connection, node_id=None, limit=20):
+    with conn.cursor() as cur:
+        if node_id:
+            cur.execute(
+                """SELECT ts, node_id, measurement, value
+                   FROM sensor_readings
+                   WHERE node_id = %s
+                   ORDER BY id DESC LIMIT %s""",
+                (node_id, limit),
+            )
+        else:
+            cur.execute(
+                """SELECT ts, node_id, measurement, value
+                   FROM sensor_readings
+                   ORDER BY id DESC LIMIT %s""",
+                (limit,),
+            )
+        return cur.fetchall()
+
+
+def get_status(conn: psycopg2.extensions.connection):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT node_id, status, updated FROM node_status ORDER BY node_id"
+        )
+        return cur.fetchall()
 
 
 def main():
@@ -44,7 +64,7 @@ def main():
     parser.add_argument("--limit", type=int, default=20, help="Number of rows")
     args = parser.parse_args()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect()
 
     print("\n=== Node Status ===")
     for row in get_status(conn):

@@ -1,47 +1,44 @@
 #pragma once
 
 // ── WiFi credentials ─────────────────────────────────────────────
-#define WIFI_SSID     "your-ssid"
-#define WIFI_PASSWORD "your-password"
+#define WIFI_SSID     "HUAWEI-B612-8D3"
+#define WIFI_PASSWORD "homerouter123"
 
 // ── MQTT broker ──────────────────────────────────────────────────
-#define MQTT_BROKER   "192.168.1.100"   // IP of your Raspberry Pi / PC
+#define MQTT_BROKER   "192.168.8.101"   // IP of your Raspberry Pi / PC
 #define MQTT_PORT     1883
 #define MQTT_CLIENT   "esp32-gateway"
 
-// ── nRF24L01 pins (ESP32 VSPI) ───────────────────────────────────
-#define RF24_CE       22
-#define RF24_CSN      21
-// VSPI: SCK=18, MISO=19, MOSI=23
+// ── nRF24L01 pins (ESP32 default SPI) ────────────────────────────
+#define RF24_CE       14
+#define RF24_CSN      15
+// SPI: SCK=18, MISO=19, MOSI=23 (shared with LoRa)
 
-// ── LoRa SX1278 pins (ESP32 HSPI) ────────────────────────────────
-#define LORA_SS       15
-#define LORA_RST      27
+// ── LoRa SX1278 pins (ESP32 default SPI) ─────────────────────────
+#define LORA_SS       5
+#define LORA_RST      4
 #define LORA_DIO0     26
-// HSPI: SCK=14, MISO=12, MOSI=13
+// SPI: SCK=18, MISO=19, MOSI=23 (shared with nRF24)
 
-// ── LoRa config (must match lora-node) ──────────────────────────
+// ── LoRa config (must match team-lora-node-a) ───────────────────
 #define LORA_FREQUENCY    433E6
-#define LORA_SPREADING    10
+#define LORA_SPREADING    7       // SF7 — matches team-lora-node-a
 #define LORA_BANDWIDTH    125E3
 #define LORA_CODING_RATE  5
-#define LORA_SYNC_WORD    0xA5
-#define GATEWAY_ADDR      0x00
+// No sync word — team-lora-node-a uses library default
 
 // ── nRF24 config ─────────────────────────────────────────────────
-#define RADIO_CHANNEL     76
-#define ADDR_BASE           0xF0F0F0F0A0LL  // node TX → gateway RX
-#define ADDR_CMD_BASE       0xF0F0F0F000LL  // gateway TX → node RX
-#define ADDR_RELAY_CMD_BASE 0xF0F0F0F0B0LL  // gateway → relay-cmd pipe (node 3)
+#define RADIO_CHANNEL   100       // channel used by all team nodes
+#define ADDR_GTWY1      "GTWY1"  // Node C → gateway (relays B + own data)
+#define ADDR_GTWY2      "GTWY2"  // Node D → gateway (direct)
 
 // ── Nodes ────────────────────────────────────────────────────────
-// Direct nRF24 nodes: 1 (Fab Lab), 2 (MPR), 3 (Eng Block/relay),
-//                     5 (PNRB, arrives via node 3 relay)
-// LoRa node: 4 (Mech Workshop — longest distance, only LoRa module)
-// Node 5 CMD path: gateway → relay-cmd pipe on node 3 → node 3 fwds to node 5
-#define NUM_NRF_NODES   4    // pipes: nodes 1, 2, 3 direct + node 5 via relay
-#define NUM_LORA_NODES  1    // node 4 only
-#define RELAY_NODE_ID   3    // node that relays for node 5
+// Node A (id=1): LoRa, far,    sends direct to gateway
+// Node B (id=2): nRF24, far,   multihop via Node C → "GTWY1"
+// Node C (id=3): nRF24, relay, sends own data + forwards B → "GTWY1"
+// Node D (id=4): nRF24, close, sends direct to gateway → "GTWY2"
+#define NUM_NRF_NODES   2    // 2 RX pipes: GTWY1, GTWY2
+#define NUM_LORA_NODES  1    // Node A only
 
 // ── Web server port ──────────────────────────────────────────────
 #define WEB_PORT        80

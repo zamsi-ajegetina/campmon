@@ -2,15 +2,14 @@
 
 ## Overview
 
-5 field nodes across the Ashesi campus transmit temperature, humidity, and
-light data to a central ESP32 gateway.
+4 ESP32 field nodes across the Ashesi campus transmit LDR (light) readings
+to a central ESP32 gateway over nRF24L01 and LoRa SX1278.
 
-**Radio allocation (hardware available: 5× nRF24L01, 1× LoRa):**
-- Nodes 1, 2, 3: nRF24L01, direct link to gateway
-- Node 4 (Mech Workshop, ~400m): LoRa — longest distance, only LoRa module
-- Node 5 (PNRB, ~300m): nRF24L01, **multi-hop via Node 3** (Eng Block)
-  - Node 3 acts as a transparent relay: forwards Node 5 packets to gateway
-    and relays LED commands from gateway back to Node 5
+**Radio allocation:**
+- Node A (Mech Workshop, ~400m): LoRa SX1278 — longest range, direct to gateway
+- Node B (PNRB, ~300m): nRF24L01, **multi-hop via Node C**
+  - Node C (Eng Block) relays Node B packets to gateway and sends its own data
+- Node D (Fab Lab / MPR, ~50–100m): nRF24L01, direct to gateway
 
 ---
 
@@ -18,19 +17,18 @@ light data to a central ESP32 gateway.
 
 ```mermaid
 graph TB
-    subgraph FIELD_NEAR["Near Field Nodes (nRF24L01, direct)"]
-        N1["Node 1 — Fab Lab<br/>nRF24L01 | ~50m<br/>DHT22 + LDR + LED"]
-        N2["Node 2 — MPR<br/>nRF24L01 | ~100m<br/>DHT22 + LDR + LED"]
-        N3["Node 3 — Eng Block<br/>nRF24L01 | ~150m<br/>DHT22 + LDR + LED<br/><b>+ RELAY for Node 5</b>"]
+    subgraph FIELD_FAR["Far Field Nodes (>200m)"]
+        NA["Node A — Mech Workshop<br/>LoRa SX1278 | ~400m<br/>LDR sensor<br/>(Arduino)"]
+        NB["Node B — PNRB<br/>nRF24L01 | ~300m total<br/>LDR sensor<br/>(ESP32, multi-hop via C)"]
     end
 
-    subgraph FIELD_FAR["Far Field Nodes (>200m)"]
-        N4["Node 4 — Mech Workshop<br/>LoRa SX1278 | ~400m<br/>DHT22 + LDR + LED"]
-        N5["Node 5 — PNRB<br/>nRF24L01 | ~300m<br/>DHT22 + LDR + LED<br/>(multi-hop via Node 3)"]
+    subgraph FIELD_NEAR["Near / Relay Nodes"]
+        NC["Node C — Eng Block<br/>nRF24L01 | ~150m<br/>LDR sensor<br/>(ESP32, <b>relay for Node B</b>)"]
+        ND["Node D — Fab Lab / MPR<br/>nRF24L01 | ~50–100m<br/>LDR sensor<br/>(ESP32, direct)"]
     end
 
     subgraph GATEWAY["Gateway (ESP32 — central location)"]
-        GW["ESP32 Gateway<br/>────────────────────<br/>• nRF24L01 (VSPI): 4 pipes<br/>  nodes 1,2,3 direct + node 5 relayed<br/>• LoRa SX1278 (HSPI): node 4<br/>• WiFi client → MQTT<br/>• Web server (LED control UI)"]
+        GW["ESP32 Gateway<br/>────────────────────<br/>• nRF24L01 (VSPI): pipe 'GTWY1' ← C+B relay<br/>                    pipe 'GTWY2' ← D direct<br/>• LoRa SX1278 (HSPI): ← A direct<br/>• WiFi → MQTT publish<br/>• Web server: live node status"]
     end
 
     subgraph BACKEND["Backend Server"]
@@ -41,49 +39,40 @@ graph TB
     end
 
     subgraph USER["User Access"]
-        WEBUI["Web Browser<br/>ESP32 Web UI<br/>LED Control"]
         DASH["Web Browser<br/>Grafana Dashboard"]
+        WEBUI["Web Browser<br/>ESP32 Web UI<br/>http://&lt;gateway-ip&gt;/"]
     end
 
-    %% Direct nRF24 links
-    N1 -- "nRF24L01\n2.4GHz | ~50m" --> GW
-    N2 -- "nRF24L01\n2.4GHz | ~100m" --> GW
-    N3 -- "nRF24L01\n2.4GHz | ~150m" --> GW
-
-    %% Multi-hop: Node 5 → Node 3 (relay) → Gateway
-    N5 -- "nRF24L01\n~150m hop" --> N3
-    N3 -. "relay fwd\n(node 5 pkt)" .-> GW
-
     %% LoRa direct
-    N4 -- "LoRa 433MHz\n~400m" --> GW
+    NA -- "LoRa 433 MHz, SF7<br/>~400m" --> GW
 
-    %% LED command downlinks
-    GW -- "CMD (nRF24)" --> N1
-    GW -- "CMD (nRF24)" --> N2
-    GW -- "CMD (nRF24)" --> N3
-    GW -- "CMD (LoRa)" --> N4
-    GW -. "relay-cmd to N3\nN3 fwds to N5" .-> N5
+    %% Multi-hop: Node B → Node C → Gateway
+    NB -- "nRF24 ch100<br/>'NODEC' | ~150m" --> NC
+    NC -- "nRF24 ch100<br/>'GTWY1' (own + fwd B)<br/>~150m" --> GW
+
+    %% Direct nRF24
+    ND -- "nRF24 ch100<br/>'GTWY2' | ~50–100m" --> GW
 
     %% Backend pipeline
-    GW -- "WiFi / MQTT\ncampus/sensors/#" --> MQTT
+    GW -- "WiFi / MQTT<br/>campus/sensors/#<br/>campus/status/#" --> MQTT
     MQTT --> PY
     PY --> DB
     DB --> GRAF
 
     %% User access
-    WEBUI -- "HTTP POST /control" --> GW
+    WEBUI -- "HTTP GET /data" --> GW
     DASH -- "HTTP" --> GRAF
 
-    classDef nodeNear fill:#4CAF50,color:#fff,stroke:#388E3C
     classDef nodeFar  fill:#FF5722,color:#fff,stroke:#BF360C
     classDef relay    fill:#8BC34A,color:#fff,stroke:#558B2F,stroke-width:3px
+    classDef nodeNear fill:#4CAF50,color:#fff,stroke:#388E3C
     classDef gateway  fill:#2196F3,color:#fff,stroke:#1565C0
     classDef backend  fill:#FF9800,color:#fff,stroke:#E65100
     classDef user     fill:#9C27B0,color:#fff,stroke:#6A1B9A
 
-    class N1,N2 nodeNear
-    class N3 relay
-    class N4,N5 nodeFar
+    class NA,NB nodeFar
+    class NC relay
+    class ND nodeNear
     class GW gateway
     class MQTT,PY,DB,GRAF backend
     class WEBUI,DASH user
@@ -91,86 +80,98 @@ graph TB
 
 ---
 
-## Multi-Hop Detail (Node 5 via Node 3)
+## Multi-Hop Detail (Node B via Node C)
 
 ```
 Data path (up):
-  Node 5 ──[nRF24, ~150m]──> Node 3 ──[nRF24, ~150m]──> Gateway
-  (PNRB)                     (Eng Block, relay)            (ESP32)
+  Node B ──[nRF24, ch100, 'NODEC', ~150m]──> Node C ──[nRF24, 'GTWY1', ~150m]──> Gateway
+  (PNRB)                                     (Eng Block, relay)                     (ESP32)
 
-Control path (down):
-  Gateway ──[nRF24 relay-cmd]──> Node 3 ──[nRF24 fwd]──> Node 5
-           ADDR_RELAY_CMD_BASE    (extracts dest+cmd)   ADDR_CMD_BASE+5
+Node C also sends its own data:
+  Node C ──[nRF24, 'GTWY1', ~150m]──> Gateway   (every 10 s, msg = "NodeC LDR:XXXX")
 ```
 
-**Why Node 3 as relay:**
-- Node 3 (Eng Block) is ~150m from gateway — solid direct nRF24 link
+**Why Node C as relay:**
+- Eng Block is ~150m from gateway — reliable direct nRF24 link
 - PNRB is ~150m from Eng Block — another solid hop
-- Total path ~300m in two hops vs. attempting 300m direct (unreliable indoors)
-- Eng Block is likely mains-powered → relay stays awake (no deep sleep)
+- Total 300m in two reliable hops vs. single 300m direct (marginal indoors)
+- Node C must stay powered (no deep sleep) to remain a live relay
 
-**Node 3 pipe map:**
-| Pipe | Address | Purpose |
+---
+
+## Gateway nRF24 Pipe Map
+
+| Pipe | Address | Receives from |
+|------|---------|---------------|
+| 1 | `"GTWY1"` | Node C own data + Node B forwarded |
+| 2 | `"GTWY2"` | Node D direct |
+
+Node C internal pipe:
+| Role | Address | Purpose |
 |------|---------|---------|
-| TX | `ADDR_BASE + 3` | Own data → gateway |
-| TX | `ADDR_BASE + 5` | Forwarded Node 5 data → gateway |
-| TX | `ADDR_CMD_BASE + 5` | Forward LED cmd → Node 5 |
-| RX 1 | `ADDR_CMD_BASE + 3` | LED cmd for itself from gateway |
-| RX 2 | `ADDR_RELAY_BASE + 5` | Node 5 sensor data (to relay) |
-| RX 3 | `ADDR_RELAY_CMD_BASE` | Relay-cmd from gateway (for Node 5) |
+| RX | `"NODEC"` | Receives Node B packets |
+| TX | `"GTWY1"` | Forwards to gateway (own + Node B) |
 
 ---
 
 ## MQTT Topics
 
 | Topic | Direction | Payload | Description |
-|---|---|---|---|
-| `campus/sensors/{id}/temperature` | Node → Broker | float °C | Temperature |
-| `campus/sensors/{id}/humidity` | Node → Broker | float % | Humidity |
-| `campus/sensors/{id}/light` | Node → Broker | int 0-1023 | Light level |
-| `campus/status/{id}` | Node → Broker | online/offline | Heartbeat |
-| `campus/control/{id}/led` | Broker → Gateway → Node | ON/OFF | LED toggle |
+|-------|-----------|---------|-------------|
+| `campus/sensors/1/light` | Gateway → Broker | int 0–4095 | Node A LDR (LoRa) |
+| `campus/sensors/2/light` | Gateway → Broker | int 0–4095 | Node B LDR (via relay) |
+| `campus/sensors/3/light` | Gateway → Broker | int 0–4095 | Node C LDR (direct) |
+| `campus/sensors/4/light` | Gateway → Broker | int 0–4095 | Node D LDR (direct) |
+| `campus/status/{1–4}` | Gateway → Broker | online/offline | 2-min heartbeat |
 
 ---
 
 ## Node Summary
 
-| Node | Location | Radio | Link to Gateway | Distance | Power |
-|---|---|---|---|---|---|
-| 1 | Fab Lab | nRF24L01 | Direct | ~50m | USB/mains |
-| 2 | MPR | nRF24L01 | Direct | ~100m | Battery |
-| 3 | Eng Block | nRF24L01 | Direct + **relay** | ~150m | Mains (relay needs awake) |
-| 4 | Mech Workshop | LoRa SX1278 | Direct (LoRa) | ~400m | Battery |
-| 5 | PNRB | nRF24L01 | **Via Node 3** | ~300m total | Battery |
+| Node | ID | Location | Radio | Link | Distance | Power | Send interval |
+|------|----|----------|-------|------|----------|-------|---------------|
+| A | 1 | Mech Workshop | LoRa SX1278 | Direct | ~400m | Battery | 10 s |
+| B | 2 | PNRB | nRF24L01 | Via Node C relay | ~300m total | Battery | 10 s |
+| C | 3 | Eng Block | nRF24L01 | Direct + relay | ~150m | Mains (relay stays awake) | 10 s |
+| D | 4 | Fab Lab / MPR | nRF24L01 | Direct | ~50–100m | Battery | 30 s |
+| GW | — | Central | — | WiFi | — | Mains | — |
 
 ---
 
 ## Firmware Flash Guide
 
-| Node | Firmware folder | config.h setting to change |
-|---|---|---|
-| 1 | `firmware/field-node` | `NODE_ID 1` |
-| 2 | `firmware/field-node` | `NODE_ID 2` |
-| 3 | `firmware/field-node` | `NODE_ID 3` + uncomment `IS_RELAY_NODE` |
-| 4 | `firmware/lora-node` | `NODE_ID 4` |
-| 5 | `firmware/field-node` | `NODE_ID 5` + uncomment `VIA_RELAY` |
-| GW | `firmware/gateway` | Set WiFi + MQTT broker IP |
+| Node | Firmware folder | Board | Notes |
+|------|----------------|-------|-------|
+| A | `team-lora-node-a/` | Arduino Nano (ATmega328P) | LoRa SS=8, RST=7, DIO0=2; LDR=A0 |
+| B | `team-node-b/` | ESP32 Dev Module | nRF24 CE=4, CSN=5; LDR=34 |
+| C | `team-node-c-multihop/` | ESP32 Dev Module | nRF24 CE=4, CSN=5; LDR=34 — must not sleep |
+| D | `team-node-c-direct-nrf/` | ESP32 Dev Module | nRF24 CE=4, CSN=5; LDR=34 |
+| GW | `firmware/gateway/` | ESP32 Dev Module | Edit config.h for WiFi + MQTT IP |
 
 ---
 
-## Data Packet Format (12 bytes)
+## Message Format
 
-```c
-typedef struct {
-    uint8_t  node_id;       // 1 byte
-    float    temperature;   // 4 bytes — °C
-    float    humidity;      // 4 bytes — %RH
-    uint16_t light;         // 2 bytes — ADC 0-1023
-    uint8_t  led_state;     // 1 byte
-} SensorPacket;             // 12 bytes total
+All nodes transmit a plain ASCII string in a fixed 32-byte buffer:
 
-typedef struct {
-    uint8_t dest_node_id;   // target node for the command
-    uint8_t cmd;            // 1=ON, 0=OFF
-} RelayCmd;                 // 2 bytes — used only on relay-cmd pipe
 ```
+"NodeA LDR:1234\0..."    ← Node A via LoRa
+"NodeB LDR:567\0..."     ← Node B via Node C relay (nRF24)
+"NodeC LDR:890\0..."     ← Node C own data (nRF24)
+"NodeD LDR:1023\0..."    ← Node D direct (nRF24)
+```
+
+Gateway parses with `strncmp` (node ID) + `strstr("LDR:")` + `atoi` (value).
+
+## Radio Settings (all nodes + gateway must match)
+
+| Parameter | Value |
+|-----------|-------|
+| nRF24 channel | 100 |
+| nRF24 data rate | 250 kbps |
+| nRF24 PA level | LOW |
+| LoRa frequency | 433 MHz |
+| LoRa spreading factor | SF7 |
+| LoRa bandwidth | 125 kHz |
+| LoRa coding rate | 4/5 |
+| LoRa sync word | library default |

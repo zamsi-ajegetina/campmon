@@ -34,8 +34,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     border: none; border-radius: 8px; cursor: pointer;
     font-size: 0.9rem; font-weight: bold; transition: 0.2s;
   }
-  .btn-on  { background: #e94560; color: #fff; }
+  .btn-on  { background: #0f3460; color: #e0e0e0; }
   .btn-off { background: #0f3460; color: #e0e0e0; }
+  .btn-on.active  { background: #e94560; color: #fff; }
+  .btn-off.active { background: #263238; color: #fff; }
   .btn:hover { opacity: 0.85; }
   footer { text-align: center; color: #555; margin-top: 30px; font-size: 0.75rem; }
 </style>
@@ -47,46 +49,47 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
 <script>
 const NODE_LABELS = {
-  1: "Fab Lab",
-  2: "MPR",
-  3: "Engineering Block",
-  4: "Mech Workshop",
-  5: "PNRB"
+  1: "A &mdash; Mech Workshop",
+  2: "B &mdash; PNRB",
+  3: "C &mdash; Eng Block",
+  4: "D &mdash; Fab Lab"
 };
 
 function buildCard(n) {
   return `
   <div class="card" id="card-${n}">
-    <h2>Node ${n} &mdash; ${NODE_LABELS[n] || ""}</h2>
+    <h2>Node ${NODE_LABELS[n] || n}</h2>
     <span class="badge offline" id="status-${n}">Offline</span>
-    <div class="sensor-row"><span>Temperature</span><span class="val" id="t-${n}">--</span></div>
-    <div class="sensor-row"><span>Humidity</span><span class="val" id="h-${n}">--</span></div>
-    <div class="sensor-row"><span>Light</span><span class="val" id="l-${n}">--</span></div>
-    <button class="btn btn-on"  onclick="sendCmd(${n},'ON')">LED ON</button>
-    <button class="btn btn-off" onclick="sendCmd(${n},'OFF')" style="margin-top:6px">LED OFF</button>
+    <div class="sensor-row"><span>Light (LDR)</span><span class="val" id="l-${n}">--</span></div>
+    <div style="display:flex;gap:6px;margin-top:10px">
+      <button class="btn btn-on"  id="btn-on-${n}"  onclick="sendCmd(${n},'ON')">LED ON</button>
+      <button class="btn btn-off" id="btn-off-${n}" onclick="sendCmd(${n},'OFF')">LED OFF</button>
+    </div>
   </div>`;
 }
 
-// Render cards
 const container = document.getElementById("nodes");
-for (let i = 1; i <= 5; i++) container.innerHTML += buildCard(i);
+for (let i = 1; i <= 4; i++) container.innerHTML += buildCard(i);
 
-// Fetch latest data from gateway
 async function refresh() {
   try {
     const r = await fetch("/data");
     const data = await r.json();
     data.forEach(d => {
       const status = document.getElementById("status-" + d.node_id);
-      if (status) {
-        status.textContent = d.online ? "Online" : "Offline";
-        status.className = "badge " + (d.online ? "online" : "offline");
-        document.getElementById("t-" + d.node_id).textContent =
-          d.temperature !== null ? d.temperature.toFixed(1) + " °C" : "--";
-        document.getElementById("h-" + d.node_id).textContent =
-          d.humidity !== null ? d.humidity.toFixed(1) + " %" : "--";
-        document.getElementById("l-" + d.node_id).textContent =
-          d.light !== null ? d.light : "--";
+      if (!status) return;
+      status.textContent = d.online ? "Online" : "Offline";
+      status.className = "badge " + (d.online ? "online" : "offline");
+      document.getElementById("l-" + d.node_id).textContent =
+        d.light !== undefined ? d.light : "--";
+      const btnOn  = document.getElementById("btn-on-"  + d.node_id);
+      const btnOff = document.getElementById("btn-off-" + d.node_id);
+      if (d.led) {
+        btnOn.classList.add("active");
+        btnOff.classList.remove("active");
+      } else {
+        btnOff.classList.add("active");
+        btnOn.classList.remove("active");
       }
     });
   } catch(e) { console.error(e); }
@@ -98,6 +101,7 @@ async function sendCmd(nodeId, action) {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: "node=" + nodeId + "&cmd=" + action
   });
+  refresh();
 }
 
 refresh();

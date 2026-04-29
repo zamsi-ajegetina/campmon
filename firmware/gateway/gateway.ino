@@ -2,20 +2,33 @@
  * Gateway Firmware
  * Target: ESP32 DevKit V1
  *
- * Features:
- *  - Receives sensor packets from 3 nRF24L01 near-nodes (pipes 1-3)
- *  - Receives sensor packets from 2 LoRa far-nodes (node 4 & 5)
- *  - Publishes all readings to MQTT broker over WiFi
- *  - Serves a web UI at http://<gateway-ip>/ for LED control
- *  - Forwards LED commands back to nodes via the respective radio
+ * Receives LDR readings from 4 team field nodes and bridges to MQTT + web UI.
+ * Supports LED on/off commands from the web UI and MQTT.
+ *
+ * Node topology:
+ *  Node A (id=1, LoRa, far)           → gateway direct via LoRa
+ *  Node B (id=2, nRF24, far)          → Node C relay → gateway via "GTWY1"
+ *  Node C (id=3, nRF24, relay)        → gateway via "GTWY1" (own + forwarded B)
+ *  Node D (id=4, nRF24, close/direct) → gateway via "GTWY2"
+ *
+ * Message format: char[32] "NodeX LDR:YYYY"
+ * LED command format: char[32] "LED:1" or "LED:0"
+ *
+ * LED command routing:
+ *  Node A → LoRa packet "LED:1/0" during STATE_LORA
+ *  Node C → nRF24 TX to "CMDC1" during STATE_NRF
+ *  Node D → nRF24 TX to "CMDD1" during STATE_NRF
+ *  Node B → nRF24 TX to "CMDB1" (Node C receives + relays to Node B) during STATE_NRF
+ *
+ * Radio loop: STATE_LORA (2 min) → STATE_IDLE (1 min) → STATE_NRF (2 min) → repeat
+ * Only one radio is active at a time (shared SPI bus).
  *
  * Libraries:
- *  RF24, arduino-LoRa, PubSubClient, ESPAsyncWebServer, AsyncTCP,
- *  ArduinoJson
+ *  RF24, arduino-LoRa, PubSubClient, ESPAsyncWebServer, AsyncTCP, ArduinoJson
  *
- * Hardware wiring:
- *  nRF24L01 → VSPI (SCK=18, MISO=19, MOSI=23, CSN=21, CE=22)
- *  LoRa SX1278 → HSPI (SCK=14, MISO=12, MOSI=13, SS=15, RST=27, DIO0=26)
+ * Hardware wiring (shared SPI — matches team-gateway):
+ *  nRF24L01    → CE=14, CSN=15, SPI: SCK=18, MISO=19, MOSI=23
+ *  LoRa SX1278 → SS=5,  RST=4,  DIO0=26, same SPI bus
  */
 
 #include <SPI.h>
@@ -28,79 +41,211 @@
 #include "config.h"
 #include "web_ui.h"
 
-// ── Packet struct (must match field nodes) ───────────────────────
-typedef struct __attribute__((packed)) {
-    uint8_t  node_id;
-    float    temperature;
-    float    humidity;
-    uint16_t light;
-    uint8_t  led_state;
-} SensorPacket;
+// ── State machine ────────────────────────────────────────────────
+enum GatewayState { STATE_LORA, STATE_IDLE, STATE_NRF };
+GatewayState currentState;
+unsigned long stateStart;
 
-// ── Last known readings per node ─────────────────────────────────
+#define LORA_LISTEN  120000UL
+#define IDLE_PAUSE    60000UL
+#define NRF_LISTEN   120000UL
+
+// ── Per-node state (index 1–4; index 0 unused) ───────────────────
 struct NodeState {
-    float    temperature = NAN;
-    float    humidity    = NAN;
-    uint16_t light       = 0;
-    bool     online      = false;
-    uint32_t lastSeen    = 0;
+    uint16_t light    = 0;
+    bool     online   = false;
+    bool     ledOn    = false;
+    uint32_t lastSeen = 0;
 };
-NodeState nodes[6];   // index 1-5
+NodeState nodes[5];
+
+// ── Pending LED commands (set by /control or MQTT) ───────────────
+bool ledPending[5] = {};  // true = command waiting to be sent
+bool ledTarget[5]  = {};  // desired LED state for each node
+
+// ── nRF24 command TX addresses ───────────────────────────────────
+const uint8_t CMD_ADDR_C[6] = "CMDC1";  // gateway → Node C LED
+const uint8_t CMD_ADDR_D[6] = "CMDD1";  // gateway → Node D LED
+const uint8_t CMD_ADDR_B[6] = "CMDB1";  // gateway → Node C (relay LED to Node B)
 
 // ── Hardware objects ─────────────────────────────────────────────
-SPIClass vspi(VSPI);
-SPIClass hspi(HSPI);
+RF24           radio(RF24_CE, RF24_CSN);
+AsyncWebServer server(WEB_PORT);
+WiFiClient     wifiClient;
+PubSubClient   mqtt(wifiClient);
 
-RF24             radio(RF24_CE, RF24_CSN);
-AsyncWebServer   server(WEB_PORT);
-WiFiClient       wifiClient;
-PubSubClient     mqtt(wifiClient);
+// ── Forward declarations ─────────────────────────────────────────
+void connectWiFi();
+void initMQTT();
+void reconnectMQTT();
+void initLoRa();
+void initNRF24();
+void initWebServer();
+void startLoRa();
+void startIdle();
+void startNRF();
+void parseLoRaPacket();
+void sendNrfLedCmd(uint8_t nodeId, bool on);
+void sendLoRaLedCmd(bool on);
+void publishLight(uint8_t nodeId, uint16_t ldr);
+void publishStatus(uint8_t nodeId, bool online);
+bool parseNodeMsg(const char *msg, uint8_t &nodeId, uint16_t &ldr);
+void onNodeData(uint8_t nodeId, uint16_t ldr);
 
 // ── Setup ────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    delay(500);
+    delay(3000);
 
     connectWiFi();
     initMQTT();
-    initNRF24();
     initLoRa();
+    initNRF24();
     initWebServer();
+
+    currentState = STATE_LORA;
+    stateStart   = millis();
+    startLoRa();
 
     Serial.println("[Gateway] All systems ready");
 }
 
 // ── Main loop ────────────────────────────────────────────────────
 void loop() {
-    // Keep MQTT alive
     if (!mqtt.connected()) reconnectMQTT();
     mqtt.loop();
 
-    // Poll nRF24 radio
-    uint8_t pipe;
-    if (radio.available(&pipe)) {
-        SensorPacket pkt;
-        radio.read(&pkt, sizeof(pkt));
-        // Accept nodes 1,2,3 (direct) and 5 (arrives via relay on node 3)
-        if ((pkt.node_id >= 1 && pkt.node_id <= 3) || pkt.node_id == 5) {
-            handlePacket(pkt, "nRF24");
-        }
+    unsigned long now     = millis();
+    unsigned long elapsed = now - stateStart;
+
+    switch (currentState) {
+
+        case STATE_LORA:
+            if (LoRa.parsePacket()) {
+                parseLoRaPacket();
+            }
+            // Send pending LED command to Node A via LoRa
+            if (ledPending[1]) {
+                sendLoRaLedCmd(ledTarget[1]);
+                ledPending[1] = false;
+            }
+            if (elapsed >= LORA_LISTEN) {
+                currentState = STATE_IDLE;
+                stateStart   = now;
+                startIdle();
+            }
+            break;
+
+        case STATE_IDLE:
+            if (elapsed >= IDLE_PAUSE) {
+                currentState = STATE_NRF;
+                stateStart   = now;
+                startNRF();
+            }
+            break;
+
+        case STATE_NRF:
+            if (radio.available()) {
+                char msg[32] = "";
+                radio.read(msg, sizeof(msg));
+                uint8_t nodeId; uint16_t ldr;
+                if (parseNodeMsg(msg, nodeId, ldr)) {
+                    Serial.printf("[nRF24] %s\n", msg);
+                    onNodeData(nodeId, ldr);
+                }
+            }
+            // Send any pending LED commands to nRF24 nodes
+            for (int i = 2; i <= 4; i++) {
+                if (ledPending[i]) {
+                    sendNrfLedCmd(i, ledTarget[i]);
+                    ledPending[i] = false;
+                }
+            }
+            if (elapsed >= NRF_LISTEN) {
+                currentState = STATE_LORA;
+                stateStart   = now;
+                startLoRa();
+            }
+            break;
     }
 
-    // Poll LoRa radio (non-blocking)
-    int loraSize = LoRa.parsePacket();
-    if (loraSize > 0) {
-        parseLoRaPacket(loraSize);
-    }
-
-    // Mark nodes offline if no packet received in 2 minutes
-    uint32_t now = millis();
-    for (int i = 1; i <= 5; i++) {
+    // Mark nodes offline after 2 minutes of silence
+    for (int i = 1; i <= 4; i++) {
         if (nodes[i].online && (now - nodes[i].lastSeen > 120000UL)) {
             nodes[i].online = false;
             publishStatus(i, false);
         }
     }
+}
+
+// ── State transitions ────────────────────────────────────────────
+void startLoRa() {
+    radio.stopListening();
+    LoRa.receive();
+    Serial.println("[State] LoRa — listening 2 min");
+}
+
+void startIdle() {
+    LoRa.idle();
+    radio.stopListening();
+    Serial.println("[State] Idle — 1 min");
+}
+
+void startNRF() {
+    LoRa.idle();
+    radio.startListening();
+    Serial.println("[State] nRF24 — listening 2 min");
+}
+
+// ── LED command senders ──────────────────────────────────────────
+void sendNrfLedCmd(uint8_t nodeId, bool on) {
+    char cmd[32] = "";
+    snprintf(cmd, sizeof(cmd), "LED:%d", on ? 1 : 0);
+
+    const uint8_t *addr = nullptr;
+    if      (nodeId == 3) addr = CMD_ADDR_C;
+    else if (nodeId == 4) addr = CMD_ADDR_D;
+    else if (nodeId == 2) addr = CMD_ADDR_B;  // Node C will relay to B
+    else return;
+
+    radio.stopListening();
+    radio.openWritingPipe(addr);
+    bool ok = radio.write(cmd, sizeof(cmd));
+    radio.startListening();  // re-enables GTWY1 + GTWY2 reading pipes
+
+    Serial.printf("[nRF24 CMD] Node %d LED:%d %s\n", nodeId, on ? 1 : 0, ok ? "OK" : "FAIL");
+}
+
+void sendLoRaLedCmd(bool on) {
+    char cmd[32] = "";
+    snprintf(cmd, sizeof(cmd), "LED:%d", on ? 1 : 0);
+    LoRa.beginPacket();
+    LoRa.print(cmd);
+    LoRa.endPacket();
+    LoRa.receive();  // resume RX after TX
+    Serial.printf("[LoRa CMD] Node 1 LED:%d\n", on ? 1 : 0);
+}
+
+// ── Message parser ───────────────────────────────────────────────
+bool parseNodeMsg(const char *msg, uint8_t &nodeId, uint16_t &ldr) {
+    if      (strncmp(msg, "NodeA", 5) == 0) nodeId = 1;
+    else if (strncmp(msg, "NodeB", 5) == 0) nodeId = 2;
+    else if (strncmp(msg, "NodeC", 5) == 0) nodeId = 3;
+    else if (strncmp(msg, "NodeD", 5) == 0) nodeId = 4;
+    else return false;
+    const char *p = strstr(msg, "LDR:");
+    if (!p) return false;
+    ldr = (uint16_t)atoi(p + 4);
+    return true;
+}
+
+void onNodeData(uint8_t nodeId, uint16_t ldr) {
+    bool wasOffline        = !nodes[nodeId].online;
+    nodes[nodeId].light    = ldr;
+    nodes[nodeId].online   = true;
+    nodes[nodeId].lastSeen = millis();
+    publishLight(nodeId, ldr);
+    if (wasOffline) publishStatus(nodeId, true);
 }
 
 // ── WiFi ─────────────────────────────────────────────────────────
@@ -125,7 +270,18 @@ void connectWiFi() {
 // ── MQTT ─────────────────────────────────────────────────────────
 void initMQTT() {
     mqtt.setServer(MQTT_BROKER, MQTT_PORT);
-    mqtt.setCallback(mqttCallback);
+    mqtt.setCallback([](char *topic, byte *payload, unsigned int len) {
+        // campus/led/<id> → ON or OFF
+        char t[48]; strncpy(t, topic, sizeof(t));
+        char *last = strrchr(t, '/');
+        if (!last) return;
+        int nodeId = atoi(last + 1);
+        if (nodeId < 1 || nodeId > 4) return;
+        bool on = (len > 0 && payload[0] == '1');
+        nodes[nodeId].ledOn = on;
+        ledPending[nodeId]  = true;
+        ledTarget[nodeId]   = on;
+    });
     reconnectMQTT();
 }
 
@@ -134,8 +290,7 @@ void reconnectMQTT() {
         Serial.print("[MQTT] Connecting...");
         if (mqtt.connect(MQTT_CLIENT)) {
             Serial.println("OK");
-            // Subscribe to control topics so dashboard/scripts can send commands
-            mqtt.subscribe("campus/control/#");
+            mqtt.subscribe("campus/led/+");
         } else {
             Serial.print("failed rc=");
             Serial.println(mqtt.state());
@@ -144,39 +299,12 @@ void reconnectMQTT() {
     }
 }
 
-// MQTT → gateway: someone published a control command
-void mqttCallback(char *topic, byte *payload, unsigned int length) {
-    // Expected topic: campus/control/{node_id}/led
-    // Payload: "ON" or "OFF"
-    String t(topic);
-    String p;
-    for (unsigned int i = 0; i < length; i++) p += (char)payload[i];
-
-    // Extract node ID from topic
-    int lastSlash  = t.lastIndexOf('/');
-    int thirdSlash = t.indexOf('/', 8);
-    if (thirdSlash < 0 || lastSlash <= thirdSlash) return;
-    int nodeId = t.substring(thirdSlash + 1, lastSlash).toInt();
-
-    if (nodeId >= 1 && nodeId <= 5) {
-        sendLedCommand(nodeId, p == "ON" ? 1 : 0);
-    }
-}
-
-void publishSensor(const SensorPacket &pkt) {
-    char topic[48], payload[16];
-
-    snprintf(topic, sizeof(topic), "campus/sensors/%d/temperature", pkt.node_id);
-    snprintf(payload, sizeof(payload), "%.1f", pkt.temperature);
-    mqtt.publish(topic, payload, true);
-
-    snprintf(topic, sizeof(topic), "campus/sensors/%d/humidity", pkt.node_id);
-    snprintf(payload, sizeof(payload), "%.1f", pkt.humidity);
-    mqtt.publish(topic, payload, true);
-
-    snprintf(topic, sizeof(topic), "campus/sensors/%d/light", pkt.node_id);
-    snprintf(payload, sizeof(payload), "%d", pkt.light);
-    mqtt.publish(topic, payload, true);
+void publishLight(uint8_t nodeId, uint16_t ldr) {
+    if (!mqtt.connected()) return;
+    char topic[48], val[8];
+    snprintf(topic, sizeof(topic), "campus/sensors/%d/light", nodeId);
+    snprintf(val,   sizeof(val),   "%d", ldr);
+    mqtt.publish(topic, val, true);
 }
 
 void publishStatus(uint8_t nodeId, bool online) {
@@ -185,157 +313,100 @@ void publishStatus(uint8_t nodeId, bool online) {
     mqtt.publish(topic, online ? "online" : "offline", true);
 }
 
-// ── nRF24L01 ─────────────────────────────────────────────────────
-void initNRF24() {
-    vspi.begin(18, 19, 23, RF24_CSN);
-    if (!radio.begin(&vspi)) {
-        Serial.println("[ERROR] nRF24 init failed");
-        return;
-    }
-    radio.setPALevel(RF24_PA_HIGH);
-    radio.setDataRate(RF24_250KBPS);
-    radio.setChannel(RADIO_CHANNEL);
-    radio.setPayloadSize(sizeof(SensorPacket));
-
-    // Open 4 reading pipes:
-    //   pipe 1 → node 1 (Fab Lab,   direct)
-    //   pipe 2 → node 2 (MPR,       direct)
-    //   pipe 3 → node 3 (Eng Block, direct + relay for node 5)
-    //   pipe 4 → node 5 (PNRB,     arrives via node 3 relay, uses node 5 addr)
-    // Pipes 2-4 share the upper 4 address bytes with pipe 1 (nRF24 requirement).
-    const uint8_t nrfNodeIds[4] = {1, 2, 3, 5};
-    for (int i = 0; i < NUM_NRF_NODES; i++) {
-        uint64_t addr = ADDR_BASE + nrfNodeIds[i];
-        radio.openReadingPipe(i + 1, addr);
-    }
-    radio.startListening();
-    Serial.println("[nRF24] Ready (pipes: nodes 1,2,3,5)");
-}
-
-// ── LoRa ─────────────────────────────────────────────────────────
+// ── LoRa (init first — matches team-gateway order) ───────────────
 void initLoRa() {
-    hspi.begin(14, 12, 13, LORA_SS);
-    LoRa.setSPI(hspi);
     LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
 
-    if (!LoRa.begin(LORA_FREQUENCY)) {
-        Serial.println("[ERROR] LoRa init failed");
-        return;
+    pinMode(LORA_RST, OUTPUT);
+    digitalWrite(LORA_RST, LOW);  delay(100);
+    digitalWrite(LORA_RST, HIGH); delay(200);
+
+    int attempts = 0;
+    while (!LoRa.begin(LORA_FREQUENCY)) {
+        Serial.print("[LoRa] Attempt ");
+        Serial.print(++attempts);
+        Serial.println(" failed...");
+        delay(500);
+        if (attempts >= 10) {
+            Serial.println("[ERROR] LoRa gave up");
+            while (true);
+        }
     }
     LoRa.setSpreadingFactor(LORA_SPREADING);
     LoRa.setSignalBandwidth(LORA_BANDWIDTH);
     LoRa.setCodingRate4(LORA_CODING_RATE);
-    LoRa.setSyncWord(LORA_SYNC_WORD);
+    LoRa.idle();
     Serial.println("[LoRa] Ready");
 }
 
-void parseLoRaPacket(int size) {
-    if (size < (int)(2 + sizeof(SensorPacket))) return;
-
-    uint8_t dest   = LoRa.read();
-    uint8_t src    = LoRa.read();
-
-    if (dest != GATEWAY_ADDR) return;   // not for us
-
-    SensorPacket pkt;
-    for (size_t i = 0; i < sizeof(pkt); i++) {
-        ((uint8_t *)&pkt)[i] = LoRa.read();
+// ── nRF24L01 ─────────────────────────────────────────────────────
+void initNRF24() {
+    if (!radio.begin()) {
+        Serial.println("[ERROR] nRF24 init failed");
+        Serial.print("Chip connected? ");
+        Serial.println(radio.isChipConnected() ? "YES" : "NO");
+        return;
     }
-
-    if (pkt.node_id != src) return;     // sanity check
-    handlePacket(pkt, "LoRa");
-}
-
-// ── Common packet handler ────────────────────────────────────────
-void handlePacket(const SensorPacket &pkt, const char *radio) {
-    uint8_t id = pkt.node_id;
-    if (id < 1 || id > 5) return;
-
-    nodes[id].temperature = pkt.temperature;
-    nodes[id].humidity    = pkt.humidity;
-    nodes[id].light       = pkt.light;
-    nodes[id].lastSeen    = millis();
-
-    bool wasOffline = !nodes[id].online;
-    nodes[id].online = true;
-
-    Serial.printf("[%s] Node %d T=%.1f H=%.1f L=%d\n",
-                  radio, id, pkt.temperature, pkt.humidity, pkt.light);
-
-    publishSensor(pkt);
-    if (wasOffline) publishStatus(id, true);
-}
-
-// ── LED command sender ───────────────────────────────────────────
-// Routing:
-//   Nodes 1,2,3 → direct nRF24 CMD address
-//   Node 4      → LoRa addressed packet
-//   Node 5      → relay-cmd packet to Node 3, which forwards to Node 5
-void sendLedCommand(uint8_t nodeId, uint8_t cmd) {
+    radio.setPALevel(RF24_PA_LOW);
+    radio.setDataRate(RF24_250KBPS);
+    radio.setChannel(RADIO_CHANNEL);
+    radio.openReadingPipe(1, (const uint8_t *)ADDR_GTWY1);
+    radio.openReadingPipe(2, (const uint8_t *)ADDR_GTWY2);
     radio.stopListening();
+    Serial.println("[nRF24] Ready (GTWY1=C/B relay, GTWY2=D direct)");
+}
 
-    if (nodeId == 4) {
-        // LoRa: node 4 only
-        LoRa.beginPacket();
-        LoRa.write(nodeId);
-        LoRa.write(GATEWAY_ADDR);
-        LoRa.write(cmd);
-        LoRa.endPacket();
+// ── LoRa packet handler ──────────────────────────────────────────
+void parseLoRaPacket() {
+    String msg = "";
+    while (LoRa.available()) msg += (char)LoRa.read();
+    int rssi = LoRa.packetRssi();
+    Serial.printf("[LoRa] %s  RSSI:%d\n", msg.c_str(), rssi);
 
-    } else if (nodeId == 5) {
-        // Node 5 is out of gateway range — send RelayCmd to Node 3.
-        // Node 3 will retransmit the cmd to Node 5's CMD address.
-        struct { uint8_t dest; uint8_t c; } rc = { nodeId, cmd };
-        radio.openWritingPipe(ADDR_RELAY_CMD_BASE);
-        radio.write(&rc, sizeof(rc));
-
-    } else {
-        // Nodes 1, 2, 3 — direct nRF24
-        radio.openWritingPipe(ADDR_CMD_BASE + nodeId);
-        radio.write(&cmd, 1);
+    uint8_t nodeId; uint16_t ldr;
+    if (parseNodeMsg(msg.c_str(), nodeId, ldr)) {
+        onNodeData(nodeId, ldr);
     }
-
-    radio.startListening();
-    Serial.printf("[CMD] Node %d LED -> %s\n", nodeId, cmd ? "ON" : "OFF");
 }
 
 // ── Web server ───────────────────────────────────────────────────
 void initWebServer() {
-    // Serve dashboard page
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
         req->send_P(200, "text/html", INDEX_HTML);
     });
 
-    // JSON endpoint: last known state of all nodes
+    // JSON data for all 4 nodes
     server.on("/data", HTTP_GET, [](AsyncWebServerRequest *req) {
         StaticJsonDocument<512> doc;
         JsonArray arr = doc.to<JsonArray>();
-        for (int i = 1; i <= 5; i++) {
+        const char *names[] = {"", "A - Mech Workshop", "B - PNRB", "C - Eng Block", "D - Fab Lab"};
+        for (int i = 1; i <= 4; i++) {
             JsonObject o = arr.createNestedObject();
-            o["node_id"]     = i;
-            o["online"]      = nodes[i].online;
-            o["temperature"] = isnan(nodes[i].temperature) ? (float)0 : nodes[i].temperature;
-            o["humidity"]    = isnan(nodes[i].humidity)    ? (float)0 : nodes[i].humidity;
-            o["light"]       = nodes[i].light;
+            o["node_id"] = i;
+            o["name"]    = names[i];
+            o["online"]  = nodes[i].online;
+            o["light"]   = nodes[i].light;
+            o["led"]     = nodes[i].ledOn;
         }
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);
     });
 
-    // POST /control — body: node=<id>&cmd=<ON|OFF>
+    // LED control endpoint: POST /control  body: node=1&cmd=ON
     server.on("/control", HTTP_POST, [](AsyncWebServerRequest *req) {
-        if (req->hasParam("node", true) && req->hasParam("cmd", true)) {
-            int    nodeId = req->getParam("node", true)->value().toInt();
-            String action = req->getParam("cmd",  true)->value();
-            if (nodeId >= 1 && nodeId <= 5) {
-                uint8_t ledCmd = (action == "ON") ? 1 : 0;
-                sendLedCommand(nodeId, ledCmd);
-                // Also publish to MQTT so it's logged
-                char topic[40];
-                snprintf(topic, sizeof(topic), "campus/control/%d/led", nodeId);
-                mqtt.publish(topic, action.c_str());
-            }
+        if (!req->hasParam("node", true) || !req->hasParam("cmd", true)) {
+            req->send(400, "text/plain", "Bad request");
+            return;
+        }
+        int  nodeId = req->getParam("node", true)->value().toInt();
+        bool on     = req->getParam("cmd",  true)->value() == "ON";
+
+        if (nodeId >= 1 && nodeId <= 4) {
+            nodes[nodeId].ledOn = on;
+            ledPending[nodeId]  = true;
+            ledTarget[nodeId]   = on;
+            Serial.printf("[Web] LED cmd: Node %d → %s\n", nodeId, on ? "ON" : "OFF");
         }
         req->send(200, "text/plain", "OK");
     });
