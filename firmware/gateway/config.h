@@ -21,22 +21,22 @@
 // SPI: SCK=18, MISO=19, MOSI=23 (shared with nRF24)
 
 // ── LoRa config (must match team-lora-node-a) ───────────────────
-#define LORA_FREQUENCY    433E6
+#define LORA_FREQUENCY    433.5E6
 #define LORA_SPREADING    7       // SF7 — matches team-lora-node-a
 #define LORA_BANDWIDTH    125E3
 #define LORA_CODING_RATE  5
-// No sync word — team-lora-node-a uses library default
+#define LORA_SYNC_WORD    0xF3   // Sync word — must match all LoRa nodes
 
 // ── nRF24 config ─────────────────────────────────────────────────
 #define RADIO_CHANNEL   100       // channel used by all team nodes
 #define ADDR_GTWY1      "GTWY1"  // Node C → gateway (relays B + own data)
-#define ADDR_GTWY2      "GTWY2"  // Node D → gateway (direct)
+#define ADDR_GTWY2      "ATWY1"  // Node D → gateway (direct)
 
 // ── Nodes ────────────────────────────────────────────────────────
 // Node A (id=1): LoRa, far,    sends direct to gateway
 // Node B (id=2): nRF24, far,   multihop via Node C → "GTWY1"
 // Node C (id=3): nRF24, relay, sends own data + forwards B → "GTWY1"
-// Node D (id=4): nRF24, close, sends direct to gateway → "GTWY2"
+// Node D (id=4): nRF24, close, sends direct to gateway → "ATWY1"
 #define NUM_NRF_NODES   2    // 2 RX pipes: GTWY1, GTWY2
 #define NUM_LORA_NODES  1    // Node A only
 

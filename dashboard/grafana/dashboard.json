@@ -90,7 +90,7 @@
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
-          "rawSql": "SELECT CASE node_id WHEN 1 THEN 'A - Mech Workshop' WHEN 2 THEN 'B - PNRB' WHEN 3 THEN 'C - Eng Block' WHEN 4 THEN 'D - Fab Lab' END AS metric, value FROM sensor_readings WHERE measurement = 'light' AND id IN (SELECT MAX(id) FROM sensor_readings WHERE measurement = 'light' GROUP BY node_id) ORDER BY node_id",
+          "rawSql": "SELECT MAX(CASE WHEN node_id = 1 THEN value END) AS \"A - Mech Workshop\", MAX(CASE WHEN node_id = 2 THEN value END) AS \"B - PNRB\", MAX(CASE WHEN node_id = 3 THEN value END) AS \"C - Eng Block\", MAX(CASE WHEN node_id = 4 THEN value END) AS \"D - Fab Lab\" FROM sensor_readings WHERE measurement = 'light' AND id IN (SELECT MAX(id) FROM sensor_readings WHERE measurement = 'light' GROUP BY node_id)",
           "format": "table",
           "refId": "A"
         }
